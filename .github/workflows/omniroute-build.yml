@@ -1,0 +1,91 @@
+name: OmniRoute isolated build candidate
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: omniroute-isolated-candidate
+  cancel-in-progress: false
+jobs:
+  build:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      CI: 'true'
+      OMNIROUTE_USE_TURBOPACK: '0'
+      CIRCLE_NODE_TOTAL: '2'
+      NODE_OPTIONS: --max-old-space-size=6144
+      UPSTREAM_SHA: a7000ec2383dd9a681cee5f09e35915682d93ab4
+    steps:
+      - name: Set up pinned Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22.23.5'
+      - name: Fetch only public upstream and check exact source
+        shell: bash
+        run: |
+          set -euo pipefail
+          free -h
+          df -h .
+          git init upstream
+          git -C upstream remote add origin https://github.com/cheaper-inference/OmniRoute.git
+          git -C upstream fetch --depth=1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+          cd upstream
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_SHA"
+          test "$(git hash-object package.json)" = ec612ebd658ed19685c832c01200663c8f688765
+          test "$(git hash-object package-lock.json)" = bbeb8ccca0bbb7dada6260afdad52a54ae6be32a
+          test "$(node -p 'process.version')" = v22.23.5
+          npm install -g npm@11.19.0 --ignore-scripts --no-audit --no-fund
+          test "$(npm --version)" = 11.19.0
+      - name: Reproduce reviewed dependency correction
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pkg set dependencies.monaco-editor=0.58.0
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          printf '%s  %s\n' 0f1f5e8f65e0d6712dbe37a833e609f6d55a269ae3bfaecedbae30e0a194ebfc package.json b399610d4a6b4b790ff7233388b7abe86eaafd703144ca493d875ac4ac878fac package-lock.json | sha256sum -c -
+          npm ci --ignore-scripts --no-audit --no-fund
+          printf '%s  %s\n' 7e8ac9d830a0183b4aa42f499661c5fddb0bb0374397b366fa6b460bfb126ea1 node_modules/monaco-editor/esm/vs/base/browser/dompurify/dompurify.js | sha256sum -c -
+          npm audit --omit=dev --json > "$RUNNER_TEMP/omniroute-audit.json"
+          node -e 'const a=require(process.argv[1]); if(a.metadata.vulnerabilities.total!==0) process.exit(1)' "$RUNNER_TEMP/omniroute-audit.json"
+          npm run check:native-deps
+      - name: Full standalone build on the external runner
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          test -s .build/next/standalone/package.json
+          test -s .build/next/BUILD_ID
+          test -f .build/next/standalone/dev/run-standalone.mjs
+          printf '%s  %s\n' 0f1f5e8f65e0d6712dbe37a833e609f6d55a269ae3bfaecedbae30e0a194ebfc package.json b399610d4a6b4b790ff7233388b7abe86eaafd703144ca493d875ac4ac878fac package-lock.json | sha256sum -c -
+      - name: Package review-only output
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/omniroute-review"
+          mkdir -p "$out"
+          cp LICENSE .build/next/standalone/LICENSE
+          cp "$RUNNER_TEMP/omniroute-audit.json" "$out/audit.json"
+          cp package.json package-lock.json "$out/"
+          printf 'upstream=%s\nnode=%s\nnpm=%s\nrun=%s\nrun_attempt=%s\nacceptance=BUILD_ONLY\n' "$UPSTREAM_SHA" "$(node --version)" "$(npm --version)" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$out/build-receipt.txt"
+          tar -C .build/next -czf "$RUNNER_TEMP/omniroute-standalone.tar.gz" standalone
+          split -b 1900M -d -a 3 "$RUNNER_TEMP/omniroute-standalone.tar.gz" "$out/standalone.tar.gz.part-"
+          rm "$RUNNER_TEMP/omniroute-standalone.tar.gz"
+          (cd "$out" && sha256sum -- * > SHA256SUMS && sha256sum -c SHA256SUMS)
+      - name: Store in draft release only (not published)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft \
+            --title 'OmniRoute build-only review candidate' \
+            --notes 'Public upstream source only. Build candidate, not a production release. Independent security, native CPU, isolated runtime, failover and budget admission checks remain required.' \
+            "$RUNNER_TEMP/omniroute-review/"*
