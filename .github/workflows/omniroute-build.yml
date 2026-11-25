@@ -45,7 +45,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm pkg set dependencies.monaco-editor=0.58.0
+          node -e 'const fs=require("node:fs");const p="package.json";const s=fs.readFileSync(p,"utf8");const a="\"monaco-editor\": \"^0.56.0\"";const b="\"monaco-editor\": \"0.58.0\"";if(s.split(a).length!==2)throw new Error("unexpected manifest");fs.writeFileSync(p,s.replace(a,b))'
+          printf '%s  %s\n' 0f1f5e8f65e0d6712dbe37a833e609f6d55a269ae3bfaecedbae30e0a194ebfc package.json | sha256sum -c -
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
           printf '%s  %s\n' 0f1f5e8f65e0d6712dbe37a833e609f6d55a269ae3bfaecedbae30e0a194ebfc package.json b399610d4a6b4b790ff7233388b7abe86eaafd703144ca493d875ac4ac878fac package-lock.json | sha256sum -c -
           npm ci --ignore-scripts --no-audit --no-fund
